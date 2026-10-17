@@ -174,6 +174,21 @@ export function EditorPreviewPanel() {
         </div>
       </div>
 
+{/* Probe failure detail: shown inline (not only in a tooltip) so the
+          reason is visible in a screenshot / bug report. */}
+      {pagination.status === "unavailable" ? (
+        <div
+          role="status"
+          className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] leading-4 text-amber-900 dark:border-amber-500/20 dark:bg-amber-950/30 dark:text-amber-200"
+        >
+          <span className="font-semibold">
+            {t("editor.toolbar.paginationUnavailable")}
+          </span>
+          {pagination.lastError ? (
+            <span className="ml-2 break-all opacity-90">{pagination.lastError}</span>
+          ) : null}
+        </div>
+      ) : null}
       {/* Preview body */}
       <div
         ref={scrollRef}

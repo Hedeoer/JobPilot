@@ -547,6 +547,15 @@ fn normalize_probe_page_text(text: &str) -> String {
         .collect();
     folded
 }
+/// Count pages from the PDF page tree.
+///
+/// Deliberately independent of text extraction: a PDF whose text layer we
+/// cannot parse must still yield a correct page count. `lopdf` is already in
+/// the dependency tree via `pdf-extract`, so this adds no new crate download.
+fn count_pdf_pages(bytes: &[u8]) -> Result<usize, String> {
+    let document = lopdf::Document::load_mem(bytes).map_err(|error| error.to_string())?;
+    Ok(document.get_pages().len())
+}
 
 fn run_pagination_probe_print(
     browser_path: &Path,
@@ -599,9 +608,13 @@ fn run_pagination_probe_print(
             Ok(())
         }
         BrowserCommandResult::ProducedPdf => Ok(()),
-        BrowserCommandResult::TimedOut => {
-            Err("pagination probe timed out: browser did not exit within the timeout".into())
-        }
+BrowserCommandResult::TimedOut => Err(format!(
+            "pagination probe timed out after {}s: {} did not exit and produced no PDF at {}. \
+             Likely causes: web font fetch blocking the print, or a stale Chrome profile.",
+            PAGINATION_PROBE_PROCESS_TIMEOUT_MS / 1000,
+            browser_path.display(),
+            pdf_path.display(),
+        )),
         BrowserCommandResult::LaunchFailed(error) => Err(format!(
             "failed to launch browser {} for pagination probe: {error}",
             browser_path.display()
@@ -707,13 +720,14 @@ pub async fn preview_resume_pagination(
                         temp_profile_dir = Some(fallback_dir);
                         None
                     }
-                    Err(_second_error) => Some(format!(
-                        "pagination probe failed with persistent and fallback profiles: {first_error}"
+Err(second_error) => Some(format!(
+                        "pagination probe failed with both profiles. persistent_profile: {first_error} | \
+                         fallback_profile: {second_error}"
                     )),
                 }
             }
         };
-        let result = match probe_error {
+let result = match probe_error {
             Some(error) => Err(error),
             None => (|| -> Result<PaginationProbeResult, String> {
                 wait_for_pdf_export_output(&pdf_path)?;
@@ -724,31 +738,44 @@ pub async fn preview_resume_pagination(
                         pdf_path.display()
                     )
                 })?;
-                let pages = pdf_extract::extract_text_from_mem_by_pages(&bytes)
-                    .map_err(|error| format!("failed to extract pdf pages: {error}"))?;
-                let page_count = pages.len().max(1);
-                let page_texts = if pages.is_empty() {
-                    vec![String::new()]
-                } else {
-                    pages
+
+                // Page count comes from the PDF page tree, NOT from text
+                // extraction: Chrome can print a perfectly good PDF whose text
+                // pdf-extract cannot parse (newer Chrome object streams), and a
+                // text failure must not cost us the count.
+                let page_count = count_pdf_pages(&bytes).map_err(|error| {
+                    format!("failed to count pdf pages ({error}); pdf_bytes={}", bytes.len())
+                })?;
+
+                // Text is best-effort: it only drives page-boundary lines.
+                let page_texts = match pdf_extract::extract_text_from_mem_by_pages(&bytes) {
+                    Ok(pages) if !pages.is_empty() => pages
                         .iter()
                         .map(|text| normalize_probe_page_text(text))
-                        .collect()
+                        .collect(),
+                    Ok(_) => vec![String::new()],
+                    Err(_) => Vec::new(),
                 };
+
                 Ok(PaginationProbeResult {
-                    page_count,
+                    page_count: page_count.max(1),
                     page_texts,
                     elapsed_ms: 0,
                 })
             })(),
         };
 
-        // Clean up per-run artifacts. The persistent profile stays (it holds
-        // the fonts cache); the throwaway fallback profile is removed whole —
-        // it is only ever touched while holding the probe lock, so no live
-        // Chrome owns it at this point.
-        let _ = fs::remove_file(&pdf_path);
-        let _ = fs::remove_file(&temp_html_path);
+// Keep the artifacts of a FAILED probe (fixed names, so they can be
+        // inspected or sent along with a bug report); clean up on success.
+        if result.is_err() {
+            let _ = fs::rename(&temp_html_path, cache_dir.join("pagination-probe-failed.html"));
+            if pdf_path.exists() {
+                let _ = fs::rename(&pdf_path, cache_dir.join("pagination-probe-failed.pdf"));
+            }
+        } else {
+            let _ = fs::remove_file(&pdf_path);
+            let _ = fs::remove_file(&temp_html_path);
+        }
         if let Some(dir) = temp_profile_dir {
             let _ = fs::remove_dir_all(&dir);
         }

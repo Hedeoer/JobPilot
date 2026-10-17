@@ -254,9 +254,11 @@ export function usePaginationProbe(options: UsePaginationProbeOptions): Paginati
           // Superseded mid-flight and nothing on screen yet: show the count.
           applyPageCountOnly(entry);
         }
-      } catch (error) {
+} catch (error) {
         failuresRef.current += 1;
-        setLastError(describeError(error));
+        const message = describeError(error);
+        setLastError(message);
+        console.error("[pagination] probe failed:", message);
         if (!hasDataRef.current || failuresRef.current >= MAX_CONSECUTIVE_FAILURES) {
           setStatus("unavailable");
         }
