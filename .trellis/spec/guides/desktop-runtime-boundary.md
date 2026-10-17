@@ -1265,6 +1265,25 @@ Automated / static assertions:
 
 
 
+## Tauri Command ACL Contract
+
+Every command registered in `desktop/src-tauri/src/lib.rs` (`generate_handler![...]`)
+must ALSO be listed in `desktop/src-tauri/permissions/desktop-core.toml` under
+`commands.allow`, because the `main-capability` capability in
+`desktop/src-tauri/capabilities/default.json` grants `desktop-core`.
+
+Symptom when it is missing (no compile-time signal, fails only at runtime):
+
+```
+Command preview_resume_pagination not allowed by ACL
+```
+
+`pnpm run verify:desktop:migration` cross-checks the two lists and fails on any
+registered-but-not-allowed command, so this cannot silently regress. Precedent:
+`preview_resume_pagination`, `save_ai_analysis_record`, and
+`list_ai_analysis_records` were all missing from the allowlist (the latter two
+silently broke AI analysis persistence because one caller used a fallback).
+
 ## Pagination Preview Probe Contract
 
 ### 1. Scope / Trigger

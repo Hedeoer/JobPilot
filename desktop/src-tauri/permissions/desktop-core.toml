@@ -61,4 +61,7 @@ commands.allow = [
   "set_default_skill_selection",
   "import_skill_package",
   "confirm_import_skill_package",
+  "preview_resume_pagination",
+  "save_ai_analysis_record",
+  "list_ai_analysis_records",
 ]

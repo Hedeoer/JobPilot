@@ -48,6 +48,13 @@ pnpm dev:tauri
 
 1. **All backend calls through `desktop-api.ts`** — New Tauri commands must be wrapped with typed interfaces here.
 
+1b. **Every new Tauri command must be ACL-allowed** — This project uses an explicit allowlist in
+   `desktop/src-tauri/permissions/desktop-core.toml` (`commands.allow`). Registering a command in
+   `lib.rs`'s `generate_handler![...]` is NOT enough: the renderer fails at runtime with
+   `Command <name> not allowed by ACL` and the feature appears broken with no compile-time signal.
+   `pnpm run verify:desktop:migration` now cross-checks the handler list against that allowlist, so
+   add the command name there in the same change.
+
 2. **Route loaders for initial data** — Use `desktop-loaders.ts` to fetch route data. Do not fetch in component body without a loader pattern.
 
 3. **Zustand for state** — Use Zustand stores (`resume-store.ts`, `editor-store.ts`, `ui-store.ts`). Do not add Redux, React Query, or other state libraries.
@@ -83,7 +90,7 @@ There is no automated test suite for the desktop frontend. Quality is verified t
 - [ ] Desktop `Resume` type used (with `string` dates), not shared type
 - [ ] Tailwind classes include `dark:` variants
 - [ ] User-facing strings go through `t()` (react-i18next)
-- [ ] New Tauri commands have typed wrappers in `desktop-api.ts`
+- [ ] New Tauri commands have typed wrappers in `desktop-api.ts` **and are listed in `permissions/desktop-core.toml`** (otherwise: `Command <name> not allowed by ACL`)
 - [ ] Event listeners (`listen()`) are cleaned up in `useEffect` return
 - [ ] No new dependencies added to wrong `package.json`
 - [ ] `pnpm build:desktop-shell` passes

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -187,6 +188,76 @@ function getBoundaryMatches(touchedFiles, boundaryPaths) {
     ),
   );
 }
+/**
+ * Every command registered in the Tauri handler must also be allowed by the
+ * capability ACL, otherwise the renderer gets "Command X not allowed by ACL"
+ * at runtime and the feature silently fails. This project uses an explicit
+ * allowlist (`desktop/src-tauri/permissions/desktop-core.toml`), so a new
+ * command is not usable until it is listed there.
+ */
+function verifyCommandAcl() {
+  const label = "Verifying Tauri command ACL coverage";
+  const libPath = path.join(ROOT, "desktop/src-tauri/src/lib.rs");
+  const aclPath = path.join(
+    ROOT,
+    "desktop/src-tauri/permissions/desktop-core.toml",
+  );
+
+  let libSource;
+  let aclSource;
+  try {
+    libSource = readFileSync(libPath, "utf8");
+    aclSource = readFileSync(aclPath, "utf8");
+  } catch (error) {
+    console.error(`\n[verify-desktop-lint-boundary] ${label}`);
+    console.error(`Cannot read ACL or handler source: ${error.message}`);
+    process.exit(1);
+  }
+
+  const handlerMatch = libSource.match(/generate_handler!\[([\s\S]*?)\]/u);
+  if (!handlerMatch) {
+    console.error(`\n[verify-desktop-lint-boundary] ${label}`);
+    console.error(`Cannot find generate_handler![...] in ${libPath}.`);
+    process.exit(1);
+  }
+
+  const registered = handlerMatch[1]
+    .split("\n")
+    .map((line) => line.replace(/\/\/.*$/u, "").trim().replace(/,$/u, ""))
+    .filter((line) => line.length > 0);
+
+  const allowed = new Set(
+    [...aclSource.matchAll(/"([a-z0-9_]+)"/gu)].map((match) => match[1]),
+  );
+
+  const missing = registered.filter((command) => !allowed.has(command));
+  const unregistered = [...allowed].filter(
+    (command) => !registered.includes(command),
+  );
+
+  console.log(`\n[verify-desktop-lint-boundary] ${label}`);
+  console.log(
+    `> registered commands: ${registered.length}, ACL-allowed commands: ${allowed.size}`,
+  );
+
+  if (missing.length > 0) {
+    console.error(
+      `Commands registered but missing from permissions/desktop-core.toml: ${missing.join(", ")}`,
+    );
+    console.error(
+      "Add them to `commands.allow` or the renderer will fail with: Command <name> not allowed by ACL.",
+    );
+    process.exit(1);
+  }
+
+  if (unregistered.length > 0) {
+    console.warn(
+      `Stale ACL entries with no registered command: ${unregistered.join(", ")}`,
+    );
+  }
+
+  console.log("All registered commands are ACL-allowed.");
+}
 
 function printUsage() {
   console.log(`Usage:\n  node scripts/verify-desktop-lint-boundary.mjs active\n  node scripts/verify-desktop-lint-boundary.mjs shared\n  node scripts/verify-desktop-lint-boundary.mjs lint\n  node scripts/verify-desktop-lint-boundary.mjs reference\n  node scripts/verify-desktop-lint-boundary.mjs reference-report\n  node scripts/verify-desktop-lint-boundary.mjs touched <file...>\n  node scripts/verify-desktop-lint-boundary.mjs list\n  node scripts/verify-desktop-lint-boundary.mjs verify`);
@@ -290,7 +361,8 @@ switch (mode) {
     break;
   }
 
-  case "verify": {
+case "verify": {
+    verifyCommandAcl();
     runCommand("Type-checking repo", "pnpm", ["type-check"]);
     runEslint("Linting desktop blocking surface", DESKTOP_BLOCKING_PATHS);
     runEslint("Linting desktop shared blocking surface", SHARED_BLOCKING_PATHS);
