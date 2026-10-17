@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, RotateCw, ZoomIn, ZoomOut } from "lucide-react";
+import { AlertTriangle, Loader2, RotateCw, ZoomIn, ZoomOut } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { PaginationOverlay } from "@/components/preview/pagination-overlay";
 import { ResumePreview } from "@/components/preview/resume-preview";
@@ -99,7 +99,14 @@ export function EditorPreviewPanel() {
   if (!liveResume) return null;
 
   const pageCount = pagination.pageCount;
-  const showPaginationUi = pagination.status !== "unavailable" || pageCount !== null;
+  // Diagnostics in the tooltip: status, native error text, probe duration.
+  const paginationTooltip = [
+    pagination.status === "stale" ? t("editor.toolbar.paginationStale") : null,
+    pagination.status === "unavailable" ? pagination.lastError : null,
+    pagination.elapsedMs !== null ? `${pagination.elapsedMs} ms` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ") || undefined;
 
   return (
     <div
@@ -112,36 +119,33 @@ export function EditorPreviewPanel() {
           {t("editor.toolbar.preview")}
         </span>
         <div className="flex items-center gap-2">
-          {showPaginationUi && (
-            <div className="flex items-center gap-1 rounded-full border border-blue-100 bg-blue-50/60 px-2 py-0.5 dark:border-blue-500/20 dark:bg-blue-950/25">
-              {pagination.status === "measuring" && pageCount === null ? (
-                <Loader2 className="h-3 w-3 animate-spin text-slate-500 dark:text-zinc-400" />
-              ) : null}
-              <span
-                className="text-xs font-medium tabular-nums text-slate-600 dark:text-zinc-300"
-                title={
-                  pagination.status === "stale"
-                    ? t("editor.toolbar.paginationStale")
-                    : pagination.status === "unavailable"
-                      ? t("editor.toolbar.paginationUnavailable")
-                      : undefined
-                }
-              >
-                {pageCount === null
+          <div className="flex items-center gap-1 rounded-full border border-blue-100 bg-blue-50/60 px-2 py-0.5 dark:border-blue-500/20 dark:bg-blue-950/25">
+            {pagination.status === "measuring" && pageCount === null ? (
+              <Loader2 className="h-3 w-3 animate-spin text-slate-500 dark:text-zinc-400" />
+            ) : null}
+            {pagination.status === "unavailable" ? (
+              <AlertTriangle className="h-3 w-3 text-amber-500 dark:text-amber-400" />
+            ) : null}
+            <span
+              className="text-xs font-medium tabular-nums text-slate-600 dark:text-zinc-300"
+              title={paginationTooltip}
+            >
+              {pagination.status === "unavailable"
+                ? t("editor.toolbar.paginationUnavailable")
+                : pageCount === null
                   ? t("editor.toolbar.paginationUpdating")
                   : t("editor.toolbar.paginationPages", { count: pageCount })}
-              </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-6 w-6 cursor-pointer rounded-full p-0 text-slate-500 hover:text-blue-600 dark:text-zinc-400 dark:hover:text-blue-300"
-                aria-label={t("editor.toolbar.paginationRefresh")}
-                onClick={pagination.refresh}
-              >
-                <RotateCw className="h-3 w-3" />
-              </Button>
-            </div>
-          )}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 w-6 cursor-pointer rounded-full p-0 text-slate-500 hover:text-blue-600 dark:text-zinc-400 dark:hover:text-blue-300"
+              aria-label={t("editor.toolbar.paginationRefresh")}
+              onClick={pagination.refresh}
+            >
+              <RotateCw className="h-3 w-3" />
+            </Button>
+          </div>
           <div className="flex items-center gap-1 rounded-full border border-blue-100 bg-blue-50/60 px-1 py-0.5 dark:border-blue-500/20 dark:bg-blue-950/25">
             <Button
               variant="ghost"

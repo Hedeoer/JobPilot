@@ -520,7 +520,10 @@ pub async fn write_pdf_export(
 /// other's output. The lock is held for the whole print-and-extract run.
 static PAGINATION_PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-const PAGINATION_PROBE_PROCESS_TIMEOUT_MS: u64 = 8_000;
+/// The export path allows 30s for the same print. 8s was too tight: when the
+/// Google Fonts request is slow or blocked, Chrome legitimately needs longer
+/// before it emits the PDF, so short probes failed where exports succeeded.
+const PAGINATION_PROBE_PROCESS_TIMEOUT_MS: u64 = 25_000;
 const PAGINATION_PROBE_PAGE_TEXT_LIMIT: usize = 2_000;
 
 #[derive(Debug, Clone, Serialize)]

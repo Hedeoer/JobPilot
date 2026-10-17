@@ -7,7 +7,10 @@
  *
  * Guarantees:
  * - Single-flight: at most one probe runs; later triggers coalesce.
- * - Stale-safe: results for a superseded content hash never rebind anchors.
+ * - Bounded: every probe is raced against a watchdog, so the UI can never sit
+ *   in "measuring" forever even if the native command never settles.
+ * - Always informative: a stale result still publishes the page count when no
+ *   measurement is on screen yet, and failures surface the native error text.
  * - LRU-cached per content hash (template switches replay instantly).
  * - Store isolation: `toSharedResume` deep-clones because `generateHtml`
  *   mutates `content._qrSvgs` in place — the Zustand store must never see it.
@@ -32,7 +35,14 @@ import type { Resume as DesktopResume, ResumeSection } from "../types/resume";
 const CONTENT_PROBE_DELAY_MS = 2_000;
 /** Faster probe after template/theme changes (ms). */
 const TEMPLATE_PROBE_DELAY_MS = 300;
-/** Consecutive failures before auto-probing stops. */
+/** First measurement is worth doing immediately (ms). */
+const INITIAL_PROBE_DELAY_MS = 0;
+/**
+ * Watchdog for one probe round-trip. The native side kills its browser process
+ * at 25s, so this only fires when the IPC itself never settles.
+ */
+const PROBE_WATCHDOG_MS = 35_000;
+/** Consecutive failures before auto-probing pauses (manual refresh still works). */
 const MAX_CONSECUTIVE_FAILURES = 3;
 /** LRU cache capacity keyed by content hash. */
 const CACHE_LIMIT = 8;
@@ -43,6 +53,10 @@ export interface PaginationProbeState {
   status: PaginationStatus;
   pageCount: number | null;
   boundaries: BoundaryGeometry[];
+  /** Native error text from the last failed probe, for diagnostics. */
+  lastError: string | null;
+  /** Duration of the last successful probe, for diagnostics. */
+  elapsedMs: number | null;
   refresh: () => void;
 }
 
@@ -97,6 +111,12 @@ function hasVisibleContent(sections: ResumeSection[]): boolean {
   );
 }
 
+function describeError(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  return "unknown probe failure";
+}
+
 /** LRU cache: Map insertion order gives recency; re-set refreshes position. */
 class ProbeCache {
   private readonly entries = new Map<string, ProbeCacheEntry>();
@@ -130,21 +150,26 @@ export interface UsePaginationProbeOptions {
 
 export function usePaginationProbe(options: UsePaginationProbeOptions): PaginationProbeState {
   const { paperRef } = options;
-  const { currentResume, sections } = useResumeStore();
+  // Narrow selectors: subscribing to the whole store would re-render (and in
+  // earlier revisions re-arm the debounce) on unrelated isDirty/isSaving churn.
+  const currentResume = useResumeStore((state) => state.currentResume);
+  const sections = useResumeStore((state) => state.sections);
 
   const [status, setStatus] = useState<PaginationStatus>("measuring");
   const [pageCount, setPageCount] = useState<number | null>(null);
   const [boundaries, setBoundaries] = useState<BoundaryGeometry[]>([]);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null);
 
   const hashRef = useRef("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timerHashRef = useRef("");
   const runningRef = useRef(false);
   const pendingRef = useRef(false);
   const failuresRef = useRef(0);
   const anchorsRef = useRef<PageBoundaryAnchor[]>([]);
   const appliedHashRef = useRef("");
   const hasDataRef = useRef(false);
-  /** Template+theme of the content the current measurement belongs to. */
   const appliedTemplateRef = useRef("");
   const cache = useMemo(() => new ProbeCache(), []);
 
@@ -166,9 +191,21 @@ export function usePaginationProbe(options: UsePaginationProbeOptions): Paginati
       setPageCount(result.pageCount);
       setBoundaries(paper ? measureBoundaries(anchorsRef.current, paper) : []);
       setStatus("fresh");
+      setLastError(null);
     },
     [paperRef],
   );
+
+  /**
+   * Publish the page count without rebinding anchors. Used when a result
+   * arrives for superseded content: the DOM no longer matches the measured
+   * layout, but a real page count beats an endless spinner.
+   */
+  const applyPageCountOnly = useCallback((result: ProbeCacheEntry) => {
+    hasDataRef.current = true;
+    setPageCount(result.pageCount);
+    setStatus("stale");
+  }, []);
 
   const runProbe = useCallback(
     async (hash: string) => {
@@ -189,19 +226,38 @@ export function usePaginationProbe(options: UsePaginationProbeOptions): Paginati
         // Isolated copy: generateHtml mutates qr section content in place.
         const shared = toSharedResume({ ...resume, sections: resumeSections }, resumeSections);
         const html = await generateHtml(shared, true);
-        const result = await previewResumePagination({ html });
 
-        cache.set(hash, { pageCount: result.pageCount, pageTexts: result.pageTexts });
+        let watchdog: ReturnType<typeof setTimeout> | null = null;
+        const result = await Promise.race([
+          previewResumePagination({ html }),
+          new Promise<never>((_, reject) => {
+            watchdog = setTimeout(
+              () => reject(new Error("pagination probe watchdog expired")),
+              PROBE_WATCHDOG_MS,
+            );
+          }),
+        ]).finally(() => {
+          if (watchdog) clearTimeout(watchdog);
+        });
+
+        const entry: ProbeCacheEntry = {
+          pageCount: result.pageCount,
+          pageTexts: result.pageTexts,
+        };
+        cache.set(hash, entry);
         failuresRef.current = 0;
+        setElapsedMs(result.elapsedMs ?? null);
 
-        // Stale guard: only rebind anchors when the DOM still matches the
-        // probed content; otherwise the pending rerun picks it up.
         if (hash === hashRef.current) {
-          applyResult(hash, { pageCount: result.pageCount, pageTexts: result.pageTexts });
+          applyResult(hash, entry);
+        } else if (!hasDataRef.current) {
+          // Superseded mid-flight and nothing on screen yet: show the count.
+          applyPageCountOnly(entry);
         }
-      } catch {
+      } catch (error) {
         failuresRef.current += 1;
-        if (failuresRef.current >= MAX_CONSECUTIVE_FAILURES) {
+        setLastError(describeError(error));
+        if (!hasDataRef.current || failuresRef.current >= MAX_CONSECUTIVE_FAILURES) {
           setStatus("unavailable");
         }
       } finally {
@@ -215,9 +271,7 @@ export function usePaginationProbe(options: UsePaginationProbeOptions): Paginati
         }
       }
     },
-    // applyResult is stable; cache is stable; runProbe must stay stable too so
-    // content effects do not reset their debounce timers on every page count.
-    [applyResult, cache],
+    [applyPageCountOnly, applyResult, cache],
   );
 
   useEffect(() => {
@@ -246,7 +300,7 @@ export function usePaginationProbe(options: UsePaginationProbeOptions): Paginati
     }
 
     // Mark stale as soon as content drifts from the applied measurement.
-    if (appliedHashRef.current && appliedHashRef.current !== nextHash) {
+    if (appliedHashRef.current && appliedHashRef.current !== nextHash && hasDataRef.current) {
       setStatus((prev) => (prev === "unavailable" ? prev : "stale"));
     }
 
@@ -263,9 +317,6 @@ export function usePaginationProbe(options: UsePaginationProbeOptions): Paginati
     if (failuresRef.current >= MAX_CONSECUTIVE_FAILURES) {
       return; // backoff: manual refresh only
     }
-    if (typeof document !== "undefined" && (document.hidden || !document.hasFocus())) {
-      return; // probed on focus via the listener below
-    }
 
     const templateSnapshot = JSON.stringify([
       currentResume.template,
@@ -274,14 +325,28 @@ export function usePaginationProbe(options: UsePaginationProbeOptions): Paginati
     const templateChanged =
       previousHash !== "" && templateSnapshot !== appliedTemplateRef.current;
 
+    // Leave an already-armed timer for this same hash alone: re-arming on every
+    // store tick is what could starve the probe into never running.
+    if (timerRef.current && timerHashRef.current === nextHash) {
+      return;
+    }
+
+    const delay = !hasDataRef.current
+      ? INITIAL_PROBE_DELAY_MS
+      : templateChanged
+        ? TEMPLATE_PROBE_DELAY_MS
+        : CONTENT_PROBE_DELAY_MS;
+
     if (timerRef.current) {
       clearTimeout(timerRef.current);
     }
+    timerHashRef.current = nextHash;
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
+      timerHashRef.current = "";
       if (appliedHashRef.current === nextHash) return; // served by a faster path meanwhile
       void runProbe(hashRef.current || nextHash);
-    }, templateChanged ? TEMPLATE_PROBE_DELAY_MS : CONTENT_PROBE_DELAY_MS);
+    }, delay);
   }, [currentResume, sections, cache, paperRef, applyResult, runProbe]);
 
   // Track the template+theme snapshot of the currently applied measurement so
@@ -308,17 +373,31 @@ export function usePaginationProbe(options: UsePaginationProbeOptions): Paginati
     return () => observer.disconnect();
   }, [paperRef, refreshBoundaries]);
 
-  // Window focus: probe the current content if it is still unapplied.
+  /**
+   * Recover when the window becomes visible/focused again with unapplied
+   * content. Deliberately NOT gating the probe on focus: WebView2 reports
+   * `document.hasFocus()` unreliably, and a focus gate can starve this feature
+   * permanently (measured symptom: the badge spins forever).
+   */
   useEffect(() => {
-    const onWindowFocus = () => {
+    const probeIfPending = () => {
       const hash = hashRef.current;
       if (!hash || appliedHashRef.current === hash) return;
       if (failuresRef.current >= MAX_CONSECUTIVE_FAILURES) return;
+      if (timerRef.current) return; // already scheduled
       if (!useResumeStore.getState().currentResume) return;
       void runProbe(hash);
     };
-    window.addEventListener("focus", onWindowFocus);
-    return () => window.removeEventListener("focus", onWindowFocus);
+    const onFocus = () => probeIfPending();
+    const onVisible = () => {
+      if (!document.hidden) probeIfPending();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [runProbe]);
 
   // Clear any pending timer on unmount.
@@ -327,21 +406,24 @@ export function usePaginationProbe(options: UsePaginationProbeOptions): Paginati
       if (timerRef.current) {
         clearTimeout(timerRef.current);
         timerRef.current = null;
+        timerHashRef.current = "";
       }
     };
   }, []);
 
   const refresh = useCallback(() => {
     failuresRef.current = 0;
+    setLastError(null);
     const { currentResume: resume, sections: resumeSections } = useResumeStore.getState();
     if (!resume) return;
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
+      timerHashRef.current = "";
     }
     const hash = hashRef.current || fingerprintResume(resume, resumeSections);
     void runProbe(hash);
   }, [runProbe]);
 
-  return { status, pageCount, boundaries, refresh };
+  return { status, pageCount, boundaries, lastError, elapsedMs, refresh };
 }
