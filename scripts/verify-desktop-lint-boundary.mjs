@@ -296,7 +296,7 @@ switch (mode) {
     runEslint("Linting desktop shared blocking surface", SHARED_BLOCKING_PATHS);
     runCommand("Building desktop renderer", "pnpm", [
       "--filter",
-      "@rolerover/desktop",
+      "@jobpilot/desktop",
       "build",
     ]);
     runCommand("Checking Tauri Rust boundary", "cargo", [
