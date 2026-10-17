@@ -238,3 +238,5 @@ When changing an AI stream consumer, verify:
 5. **Missing dark mode variants** — Always include `dark:` variants for color-related Tailwind classes.
 
 6. **Appending AI stream chunks blindly** — Use `getNextStreamText()` and a ref-backed current text value. Do not append `deltaText` directly in state when `accumulatedText` may also be present.
+
+7. **Measuring the zoomed preview paper with raw `getBoundingClientRect()`** — The editor preview paper uses CSS `zoom` (30%–150%). Under `zoom`, `getBoundingClientRect()` returns screen-scaled values while `offsetTop/offsetHeight` stay in design space, so mixing them mis-positions overlays. Convert rect deltas to design space by dividing by `rect.height / el.offsetHeight` (see `measureBoundary()` in `desktop/src/lib/pagination-anchors.ts`), and convert scroll offsets with an explicit `* scale` / `/ scale`.

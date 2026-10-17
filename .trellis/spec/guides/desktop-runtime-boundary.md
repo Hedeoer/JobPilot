@@ -137,6 +137,10 @@ Desktop blocking surface enforced by `lint:desktop:active`:
 - `desktop/src/components/ai/tool-execution-card.tsx`
 - `desktop/src/components/dashboard/create-resume-dialog.tsx`
 - `desktop/src/lib/resume-import.ts`
+- `desktop/src/lib/pagination-anchors.ts`
+- `desktop/src/lib/pagination-probe.ts`
+- `desktop/src/lib/__tests__/pagination-anchors.test.ts`
+- `desktop/src/components/editor/editor-preview-panel.tsx`
 
 Shared blocking surface enforced by `lint:desktop:shared`:
 
@@ -1260,3 +1264,90 @@ Automated / static assertions:
 10. `pnpm run verify:desktop:migration`
 
 
+
+## Pagination Preview Probe Contract
+
+### 1. Scope / Trigger
+
+Any change to the editor's live pagination preview (page count badge, page
+boundary lines, current-page indicator) or to the probe command that feeds it.
+
+### 2. Signatures
+
+Rust command (file `desktop/src-tauri/src/storage.rs`):
+
+```rust
+#[tauri::command]
+async fn preview_resume_pagination(app: AppHandle, html: String)
+    -> Result<PaginationProbeResult, String>
+```
+
+Frontend wrapper (`desktop/src/lib/desktop-api.ts`):
+
+```ts
+export async function previewResumePagination(
+  input: PaginationProbeInput, // { html: string }
+): Promise<PaginationProbeResult>
+```
+
+### 3. Contracts
+
+- `PaginationProbeResult` (camelCase over IPC):
+  `{ pageCount: number; pageTexts: string[]; elapsedMs: number }`.
+  `pageTexts[k]` is whitespace-folded, 2000-char capped text of PDF page k.
+- The probe renders with the SAME Chrome flags as `write_pdf_export` and MUST
+  stay flag-identical so "preview page count == export page count" holds.
+- Probe artifacts: `app_cache_dir()/previews/pagination-probe-{ts}.html/.pdf`
+  plus a PERSISTENT profile `previews/probe-profile` (keeps the Google Fonts
+  HTTP cache warm: ~0.4s vs ~1.6s cold). Per-process single-flight via
+  `PAGINATION_PROBE_LOCK`; browser resolution happens BEFORE temp files are
+  written so the no-Chrome path never leaks probe HTML.
+- The HTML passed in MUST come from `toSharedResume(...)` isolation before
+  `generateHtml(shared, true)` — see the Wrong vs Correct pair below.
+- Boundary lines: `pagination-anchors.ts` anchors page transitions to DOM text
+  nodes (L-gram monotonic, L=8/RUN=4/backtrack 200). Pages it cannot confirm
+  produce NO line — never guess a position. Geometry is measured relative to
+  the paper container; CSS `zoom` is neutralized by dividing rect deltas by
+  `rect.height / offsetHeight` (getBoundingClientRect is zoom-scaled,
+  offsetHeight is not).
+
+### 4. Validation & Error Matrix
+
+| Scenario | Behavior |
+|---|---|
+| No Chrome/Edge on machine | Command errors; UI shows "page count unavailable", editing unaffected |
+| Browser timeout (8s) | Error; counts toward 3-failure auto-probe backoff |
+| Non-PDF output / Chrome error page | `validate_pdf_export_output` rejects; same backoff |
+| Probe profile wedged (stale Singleton*) | Clear `Singleton*` files, retry once with unique temp profile |
+| Content edited while probing | Stale guard: result cached but anchors NOT rebound; next probe rebinds |
+
+### 5. Good / Base / Bad Cases
+
+- Good: 3-page resume → badge `共 3 页`, two dashed lines anchored at the DOM
+  nodes where PDF pages 2 and 3 begin; sidebar template gets one line per lane.
+- Base: legacy template whose preview DOM diverges from export → page count
+  correct, missing boundary lines silently omitted.
+- Bad (forbidden): geometry-only `k * (A4 - margins)` boundary math — export
+  `break-inside: avoid` gaps accumulate per page and drift up to ~450px.
+
+### 6. Tests Required
+
+- `desktop/src/lib/__tests__/pagination-anchors.test.ts`: pure
+  `findPageTransitionIndices` — exact joints, whitespace/zero-width, repeated
+  page-start phrase backtracking, unanchorable page → no boundary, identical
+  repeated content → no boundary.
+
+### 7. Wrong vs Correct
+
+Wrong (mutates the Zustand store via generateHtml's `_qrSvgs` write-back):
+
+```ts
+const html = await generateHtml(liveResume, true); // pollutes store content
+```
+
+Correct:
+
+```ts
+const shared = toSharedResume({ ...resume, sections }, sections); // deep clone
+const html = await generateHtml(shared, true);
+```

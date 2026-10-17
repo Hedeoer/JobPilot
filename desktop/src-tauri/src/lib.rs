@@ -30,7 +30,7 @@ use storage::{
     AiAnalysisRecordItem, CreateDocumentInput, CreateInterviewSessionInput, DocumentDetail,
     DocumentListItem, ImportDocumentInput, InterviewMessageItem, InterviewReportRecord,
     InterviewSessionDetail, InterviewSessionListItem, ListAiAnalysisRecordsInput,
-    SaveAiAnalysisRecordInput, SaveDocumentInput, StorageSnapshot,
+    PaginationProbeResult, SaveAiAnalysisRecordInput, SaveDocumentInput, StorageSnapshot,
     TemplateValidationExportWriteResult, TemplateValidationSnapshot, UpdateDocumentInput,
     UpdateInterviewMessageMetadataInput,
 };
@@ -232,6 +232,15 @@ async fn write_pdf_export(
     html: String,
 ) -> Result<TemplateValidationExportWriteResult, String> {
     storage::write_pdf_export(app, output_path, html).await
+}
+
+
+#[tauri::command]
+async fn preview_resume_pagination(
+    app: tauri::AppHandle,
+    html: String,
+) -> Result<PaginationProbeResult, String> {
+    storage::preview_resume_pagination(app, html).await
 }
 
 #[tauri::command]
@@ -610,6 +619,7 @@ pub fn run() {
             write_template_validation_export,
             write_export_file,
             write_pdf_export,
+            preview_resume_pagination,
             get_workspace_settings_snapshot,
             get_secret_vault_status,
             get_secret_inventory_snapshot,

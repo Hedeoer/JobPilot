@@ -287,7 +287,14 @@
       "coverLetter": "求职信",
       "grammarCheck": "语法检查",
       "share": "分享",
-      "import": "导入"
+      "import": "导入",
+      "paginationPages": "共 {count} 页",
+      "paginationCurrent": "第 {current} / {total} 页",
+      "paginationUpdating": "正在计算页数…",
+      "paginationStale": "内容已更改，停止输入后更新页数",
+      "paginationUnavailable": "页数不可用",
+      "paginationRefresh": "重新计算页数",
+      "paginationPageStart": "第 {page} 页开始"
     },
     "aiPolish": "AI 润色",
     "sidebar": {

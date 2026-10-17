@@ -763,6 +763,16 @@ export interface PdfExportWriteInput extends Record<string, unknown> {
   html: string;
 }
 
+export interface PaginationProbeInput extends Record<string, unknown> {
+  html: string;
+}
+
+export interface PaginationProbeResult {
+  pageCount: number;
+  pageTexts: string[];
+  elapsedMs: number;
+}
+
 export type UpdaterArtifactsMode =
   | "disabled"
   | "current"
@@ -2053,6 +2063,12 @@ export async function writePdfExport(
   input: PdfExportWriteInput,
 ): Promise<TemplateValidationExportReceipt> {
   return invoke<TemplateValidationExportReceipt>("write_pdf_export", input);
+}
+
+export async function previewResumePagination(
+  input: PaginationProbeInput,
+): Promise<PaginationProbeResult> {
+  return invoke<PaginationProbeResult>("preview_resume_pagination", input);
 }
 
 export async function updateAiProviderSettings(

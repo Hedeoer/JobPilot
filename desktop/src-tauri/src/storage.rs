@@ -511,6 +511,257 @@ pub async fn write_pdf_export(
     })
 }
 
+// =====================================================
+// Editor pagination probe
+// =====================================================
+
+/// Serializes pagination probes: the probe writes to a fixed HTML path and a
+/// persistent Chrome profile, so two concurrent probes would corrupt each
+/// other's output. The lock is held for the whole print-and-extract run.
+static PAGINATION_PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+const PAGINATION_PROBE_PROCESS_TIMEOUT_MS: u64 = 8_000;
+const PAGINATION_PROBE_PAGE_TEXT_LIMIT: usize = 2_000;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaginationProbeResult {
+    pub page_count: usize,
+    pub page_texts: Vec<String>,
+    pub elapsed_ms: u64,
+}
+
+/// Fold whitespace runs into single spaces and trim, so the frontend receives
+/// stable text for gram-based page-transition anchoring regardless of how
+/// pdf-extract joined lines.
+fn normalize_probe_page_text(text: &str) -> String {
+    let folded: String = text
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ")
+        .chars()
+        .take(PAGINATION_PROBE_PAGE_TEXT_LIMIT)
+        .collect();
+    folded
+}
+
+fn run_pagination_probe_print(
+    browser_path: &Path,
+    print_argument: &str,
+    user_data_dir_str: &str,
+    html_url: &str,
+    pdf_path: &Path,
+) -> Result<(), String> {
+    let mut command = Command::new(browser_path);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    command
+        .arg("--headless=new")
+        .arg("--disable-gpu")
+        .arg("--allow-file-access-from-files")
+        .arg("--run-all-compositor-stages-before-draw")
+        .arg("--virtual-time-budget=12000")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--no-pdf-header-footer")
+        .arg(format!("--user-data-dir={}", user_data_dir_str))
+        .arg(print_argument)
+        .arg(html_url);
+
+    #[cfg(target_os = "linux")]
+    command.arg("--no-sandbox");
+
+    let browser_result = run_command_with_timeout(
+        command,
+        pdf_path,
+        Duration::from_millis(PAGINATION_PROBE_PROCESS_TIMEOUT_MS),
+    );
+
+    match browser_result {
+        BrowserCommandResult::Success(output) => {
+            if !output.status.success() && !pdf_path.exists() {
+                let stdout_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                return Err(format!(
+                    "pagination probe browser command failed (status: {}). stdout: {} stderr: {}",
+                    output
+                        .status
+                        .code()
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "terminated".into()),
+                    if stdout_text.is_empty() { "<empty>" } else { &stdout_text },
+                    if stderr_text.is_empty() { "<empty>" } else { &stderr_text },
+                ));
+            }
+            Ok(())
+        }
+        BrowserCommandResult::ProducedPdf => Ok(()),
+        BrowserCommandResult::TimedOut => {
+            Err("pagination probe timed out: browser did not exit within the timeout".into())
+        }
+        BrowserCommandResult::LaunchFailed(error) => Err(format!(
+            "failed to launch browser {} for pagination probe: {error}",
+            browser_path.display()
+        )),
+    }
+}
+
+/// Remove stale Chrome profile lock files so a leftover crashed probe does not
+/// wedge the persistent profile. Only files whose names start with "Singleton"
+/// are touched; the rest of the profile (font cache included) is preserved.
+/// If the profile still cannot be used, callers fall back to a unique temp
+/// profile directory.
+fn clear_probe_profile_singleton_locks(profile_dir: &Path) {
+    let Ok(entries) = fs::read_dir(profile_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if name.starts_with("Singleton") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Print `html` to PDF with the same local Chrome pipeline as PDF export and
+/// return the page count plus per-page text extracted from the produced PDF.
+///
+/// Concurrency: guarded by `PAGINATION_PROBE_LOCK` so probes are single-flight
+/// at the process level. Uses unique per-run input/output file names and a
+/// persistent profile directory (falling back to a unique temp profile on
+/// profile lock failures).
+pub async fn preview_resume_pagination(
+    app: AppHandle,
+    html: String,
+) -> Result<PaginationProbeResult, String> {
+    let started_at = Instant::now();
+
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("failed to resolve app cache dir: {error}"))?
+        .join("previews");
+    ensure_storage_directory(&cache_dir)?;
+
+    // Resolve the browser BEFORE writing temp files so the (repeatable) no-browser
+    // failure path never leaks probe HTML into the cache directory.
+    let browser_path = resolve_pdf_browser_path()?;
+
+    let timestamp = now_epoch_ms()?;
+    let temp_html_path = cache_dir.join(format!("pagination-probe-{timestamp}.html"));
+    fs::write(&temp_html_path, html.into_bytes()).map_err(|error| {
+        format!(
+            "failed to write pagination probe html {}: {error}",
+            temp_html_path.display()
+        )
+    })?;
+
+    let html_url = file_url_from_path(&temp_html_path)?;
+
+    // Persistent profile keeps the Google Fonts HTTP cache warm, cutting probe
+    // latency from ~1.6s (cold) to ~0.4s (warm). Guarded by the probe lock so
+    // only one probe uses it at a time.
+    let persistent_profile = cache_dir.join("probe-profile");
+    ensure_storage_directory(&persistent_profile)?;
+
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        // Single-flight across the whole print+extract run.
+        let _probe_guard = PAGINATION_PROBE_LOCK
+            .lock()
+            .map_err(|_| "pagination probe lock poisoned".to_string())?;
+
+        // Unique per-run output path: a leftover probe.pdf from a previous run
+        // must never be mistaken for this run's result.
+        let pdf_path = cache_dir.join(format!("pagination-probe-{timestamp}.pdf"));
+        let print_argument = format!("--print-to-pdf={}", path_to_string(&pdf_path));
+
+        let attempt_probe = |user_data_dir: &Path| -> Result<(), String> {
+            run_pagination_probe_print(
+                &browser_path,
+                &print_argument,
+                &path_to_string(user_data_dir),
+                &html_url,
+                &pdf_path,
+            )
+        };
+
+        let mut temp_profile_dir: Option<PathBuf> = None;
+
+        clear_probe_profile_singleton_locks(&persistent_profile);
+        let probe_error: Option<String> = match attempt_probe(&persistent_profile) {
+            Ok(()) => None,
+            Err(first_error) => {
+                // Profile may be wedged by a crashed Chrome (e.g. stale
+                // SingletonLock held by a long-gone process). Retry once with a
+                // unique throwaway profile before giving up.
+                let fallback_dir = cache_dir.join(format!("probe-profile-{timestamp}"));
+                match ensure_storage_directory(&fallback_dir)
+                    .map_err(|error| error.to_string())
+                    .and_then(|()| attempt_probe(&fallback_dir))
+                {
+                    Ok(()) => {
+                        temp_profile_dir = Some(fallback_dir);
+                        None
+                    }
+                    Err(_second_error) => Some(format!(
+                        "pagination probe failed with persistent and fallback profiles: {first_error}"
+                    )),
+                }
+            }
+        };
+        let result = match probe_error {
+            Some(error) => Err(error),
+            None => (|| -> Result<PaginationProbeResult, String> {
+                wait_for_pdf_export_output(&pdf_path)?;
+                validate_pdf_export_output(&pdf_path)?;
+                let bytes = fs::read(&pdf_path).map_err(|error| {
+                    format!(
+                        "failed to read pagination probe pdf {}: {error}",
+                        pdf_path.display()
+                    )
+                })?;
+                let pages = pdf_extract::extract_text_from_mem_by_pages(&bytes)
+                    .map_err(|error| format!("failed to extract pdf pages: {error}"))?;
+                let page_count = pages.len().max(1);
+                let page_texts = if pages.is_empty() {
+                    vec![String::new()]
+                } else {
+                    pages
+                        .iter()
+                        .map(|text| normalize_probe_page_text(text))
+                        .collect()
+                };
+                Ok(PaginationProbeResult {
+                    page_count,
+                    page_texts,
+                    elapsed_ms: 0,
+                })
+            })(),
+        };
+
+        // Clean up per-run artifacts. The persistent profile stays (it holds
+        // the fonts cache); the throwaway fallback profile is removed whole —
+        // it is only ever touched while holding the probe lock, so no live
+        // Chrome owns it at this point.
+        let _ = fs::remove_file(&pdf_path);
+        let _ = fs::remove_file(&temp_html_path);
+        if let Some(dir) = temp_profile_dir {
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        result
+    })
+    .await
+    .map_err(|error| format!("pagination probe task panicked: {error}"))??;
+
+    Ok(PaginationProbeResult {
+        elapsed_ms: started_at.elapsed().as_millis() as u64,
+        ..payload
+    })
+}
+
+
 pub fn load_workspace_window_state(
     app: &AppHandle,
 ) -> Result<Option<WorkspaceWindowState>, String> {

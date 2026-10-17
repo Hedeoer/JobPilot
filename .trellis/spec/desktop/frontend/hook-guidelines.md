@@ -48,11 +48,18 @@ function EditorPage() {
 
 ## Custom Hook Patterns
 
-Desktop does not define custom hooks. Instead, it uses:
+Desktop defines custom hooks only for complex multi-concern orchestration, and
+they live in `desktop/src/lib/` (NOT a `hooks/` directory). The sanctioned
+precedent is `usePaginationProbe` in `desktop/src/lib/pagination-probe.ts`
+(debounce + single-flight + LRU cache + failure backoff + DOM anchoring).
+Simple cases stay as:
 
 - **Zustand selectors** for reactive state: `useResumeStore((s) => s.sections)`
 - **`desktop-api.ts` functions** for one-shot backend calls: `await saveDocument({...})`
 - **`listen()` from `@tauri-apps/api/event`** for streaming events (AI chat)
+
+When you add a desktop lib hook, register its file in
+`scripts/verify-desktop-lint-boundary.mjs` `DESKTOP_BLOCKING_PATHS`.
 
 For AI streaming, the pattern uses Tauri event listeners directly in the component:
 

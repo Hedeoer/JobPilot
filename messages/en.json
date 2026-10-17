@@ -287,7 +287,14 @@
       "coverLetter": "Cover Letter",
       "grammarCheck": "Grammar",
       "share": "Share",
-      "import": "Import"
+      "import": "Import",
+      "paginationPages": "Pages: {count}",
+      "paginationCurrent": "Page {current} / {total}",
+      "paginationUpdating": "Calculating pages…",
+      "paginationStale": "Modified — page count updates when idle",
+      "paginationUnavailable": "Page count unavailable",
+      "paginationRefresh": "Recalculate pages",
+      "paginationPageStart": "Start of page {page}"
     },
     "aiPolish": "AI Polish",
     "sidebar": {

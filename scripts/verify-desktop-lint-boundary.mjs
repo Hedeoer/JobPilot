@@ -24,6 +24,10 @@ const DESKTOP_BLOCKING_PATHS = [
   "desktop/src/components/ai/tool-execution-card.tsx",
   "desktop/src/components/dashboard/create-resume-dialog.tsx",
   "desktop/src/lib/resume-import.ts",
+  "desktop/src/lib/pagination-anchors.ts",
+  "desktop/src/lib/pagination-probe.ts",
+  "desktop/src/lib/__tests__/pagination-anchors.test.ts",
+  "desktop/src/components/editor/editor-preview-panel.tsx",
 ];
 
 const SHARED_BLOCKING_PATHS = [

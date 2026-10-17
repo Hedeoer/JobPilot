@@ -136,3 +136,5 @@ This pattern is intentional — Zustand stores are singletons and can access eac
 4. **Adding new state libraries** — Do not introduce React Query, Redux, MobX, or other state management. The 4-store Zustand pattern is the established architecture.
 
 5. **Reading store state outside React without `getState()`** — In non-component code, use `useResumeStore.getState()` not `useResumeStore()` (the latter is a React hook).
+
+6. **Passing store objects into `generateHtml()` directly** — The shared export builder mutates its input in place (`preGenerateQrSvgs` writes `qrSection.content._qrSvgs`). Desktop callers MUST pass an isolated copy produced by `toSharedResume({ ...resume, sections }, sections)` first; otherwise the live Zustand store gets polluted and autosave can persist the render-only `_qrSvgs` field. Precedent: `usePaginationProbe` in `desktop/src/lib/pagination-probe.ts`.
