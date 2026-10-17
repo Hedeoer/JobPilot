@@ -590,22 +590,39 @@ fn run_pagination_probe_print(
     );
 
     match browser_result {
-        BrowserCommandResult::Success(output) => {
-            if !output.status.success() && !pdf_path.exists() {
-                let stdout_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                return Err(format!(
-                    "pagination probe browser command failed (status: {}). stdout: {} stderr: {}",
-                    output
-                        .status
-                        .code()
-                        .map(|code| code.to_string())
-                        .unwrap_or_else(|| "terminated".into()),
-                    if stdout_text.is_empty() { "<empty>" } else { &stdout_text },
-                    if stderr_text.is_empty() { "<empty>" } else { &stderr_text },
-                ));
+BrowserCommandResult::Success(output) => {
+            if pdf_path.exists() {
+                return Ok(());
             }
-            Ok(())
+
+            // Chrome writes the PDF before exiting, but allow a short grace
+            // window in case the file lands just after the process ends.
+            for _ in 0..12 {
+                std::thread::sleep(Duration::from_millis(150));
+                if pdf_path.exists() {
+                    return Ok(());
+                }
+            }
+
+            // Exited without a PDF: report Chrome's own output, which is the
+            // only available clue for this failure class.
+            let stdout_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr_excerpt: String = stderr_text.chars().take(400).collect();
+            let stdout_excerpt: String = stdout_text.chars().take(200).collect();
+
+            return Err(format!(
+                "browser exited (status {}) without producing a PDF at {}. This usually means Chrome \
+                 was intercepted by an already-running instance, or refused to print. stdout: {} stderr: {}",
+                output
+                    .status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "terminated".into()),
+                pdf_path.display(),
+                if stdout_excerpt.is_empty() { "<empty>" } else { &stdout_excerpt },
+                if stderr_excerpt.is_empty() { "<empty>" } else { &stderr_excerpt },
+            ));
         }
         BrowserCommandResult::ProducedPdf => Ok(()),
 BrowserCommandResult::TimedOut => Err(format!(
@@ -702,27 +719,31 @@ pub async fn preview_resume_pagination(
             )
         };
 
-        let mut temp_profile_dir: Option<PathBuf> = None;
+let mut temp_profile_dir: Option<PathBuf> = None;
 
-        clear_probe_profile_singleton_locks(&persistent_profile);
-        let probe_error: Option<String> = match attempt_probe(&persistent_profile) {
-            Ok(()) => None,
+        // Attempt 1: a unique throwaway profile per run, exactly like the
+        // export path that is known to work. Reusing a profile directory is
+        // how Chrome gets intercepted by an already-running instance and exits
+        // cleanly without ever printing (see docs/browser-pdf-export-pitfalls-note.md).
+        let fresh_profile = cache_dir.join(format!("probe-profile-{timestamp}"));
+        let probe_error: Option<String> = match ensure_storage_directory(&fresh_profile)
+            .map_err(|error| error.to_string())
+            .and_then(|()| attempt_probe(&fresh_profile))
+        {
+            Ok(()) => {
+                temp_profile_dir = Some(fresh_profile);
+                None
+            }
             Err(first_error) => {
-                // Profile may be wedged by a crashed Chrome (e.g. stale
-                // SingletonLock held by a long-gone process). Retry once with a
-                // unique throwaway profile before giving up.
-                let fallback_dir = cache_dir.join(format!("probe-profile-{timestamp}"));
-                match ensure_storage_directory(&fallback_dir)
-                    .map_err(|error| error.to_string())
-                    .and_then(|()| attempt_probe(&fallback_dir))
-                {
-                    Ok(()) => {
-                        temp_profile_dir = Some(fallback_dir);
-                        None
-                    }
-Err(second_error) => Some(format!(
-                        "pagination probe failed with both profiles. persistent_profile: {first_error} | \
-                         fallback_profile: {second_error}"
+                // Attempt 2: the persistent profile keeps the Google Fonts HTTP
+                // cache warm (~0.4s vs ~1.6s measured), so it is worth a second
+                // try once the cheap path has failed.
+                clear_probe_profile_singleton_locks(&persistent_profile);
+                match attempt_probe(&persistent_profile) {
+                    Ok(()) => None,
+                    Err(second_error) => Some(format!(
+                        "pagination probe failed with both profiles. fresh_profile: {first_error} | \
+                         persistent_profile: {second_error}"
                     )),
                 }
             }
