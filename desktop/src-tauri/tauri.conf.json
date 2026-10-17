@@ -30,7 +30,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/jlifeng/JobPilot/releases/latest/download/latest.json"
+        "https://github.com/Hedeoer/JobPilot/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ4RkI4NDI3MTM0NEYyQzkKUldUSjhrUVRKNFQ3U0RMWnN6SFVDYXg5TXBrR3B5VWlDMnZlaVVBOU9LNFFnRGZWUVVaL3hnMzAK",
       "windows": {
