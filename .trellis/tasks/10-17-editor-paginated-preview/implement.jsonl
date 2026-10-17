@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/desktop/frontend/component-guidelines.md", "reason": "Follow desktop component, accessibility, and shared component conventions"}
+{"file": ".trellis/spec/desktop/frontend/hook-guidelines.md", "reason": "Follow desktop data-fetching and backend wrapper conventions"}
+{"file": ".trellis/spec/desktop/frontend/state-management.md", "reason": "Avoid introducing a new state library and preserve store patterns"}
+{"file": ".trellis/spec/desktop/frontend/quality-guidelines.md", "reason": "Apply desktop lint/build/testing requirements"}
+{"file": ".trellis/spec/guides/desktop-runtime-boundary.md", "reason": "Define the new Tauri command contract and validation boundary"}
+{"file": ".trellis/spec/desktop/frontend/type-safety.md", "reason": "Follow desktop API and type conventions"}
